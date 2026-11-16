@@ -1,0 +1,232 @@
+#!/bin/bash
+# DeLorean Logo-Fix - Created by DeLorean23
+#
+# Puts the system logos from /userdata/system/delorean-logos (e.g. winamp.png)
+# into every installed EmulationStation theme, so own systems show their logo
+# with any theme:
+#   - downloaded themes (/userdata/themes): the logo is copied into the
+#     theme's logo folder
+#   - built-in themes (read-only, e.g. the Batocera default theme): the logo
+#     folder is copied to RAM, the logos are added and the copy is mounted over
+#     the original. Nothing on the system itself is changed.
+# Runs at every boot as Batocera service "delorean_logos".
+#
+# Usage: delorean_logos start|stop|status|apply|remove <name>
+
+LOGOS=/userdata/system/delorean-logos
+RUN=/var/run/delorean-logos
+LOG=/userdata/system/logs/delorean_logos.log
+THEME_DIRS="/usr/share/emulationstation/themes /userdata/themes"
+
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+# Print every folder where a theme looks for "<system>.png" logos.
+# Understands theme variables like ${themePath} or ${path_syst_logo}.
+logo_dirs_of_theme() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import os, re, sys
+theme = os.path.realpath(sys.argv[1])
+base = "/userdata/themes" if theme.startswith("/userdata/") else theme
+var_re = re.compile(r"<([A-Za-z_][\w.-]*)(?:\s[^>]*)?>([^<]*)</\1>")
+cand_re = re.compile(r"[^<>\"'\s]*\$\{system\.theme\}\.png")
+use_re = re.compile(r"\$\{([A-Za-z_][\w.-]*)\}")
+vars_, cands = {}, []
+for root, dirs, files in os.walk(theme, followlinks=True):
+    for f in files:
+        if not f.lower().endswith(".xml"):
+            continue
+        path = os.path.join(root, f)
+        try:
+            txt = open(path, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        for block in re.findall(r"<variables>(.*?)</variables>", txt, re.S):
+            for name, val in var_re.findall(block):
+                vars_.setdefault(name, set()).add(val.strip())
+        for c in cand_re.findall(txt):
+            cands.append((c, os.path.dirname(path)))
+def expand(s, depth=0):
+    m = use_re.search(s)
+    if not m:
+        return [s]
+    name = m.group(1)
+    if name == "themePath":
+        vals = [theme]
+    elif name == "system.theme":
+        return [s]
+    else:
+        vals = vars_.get(name)
+        if not vals or depth > 6:
+            return []
+    out = []
+    for v in vals:
+        out += expand(s[:m.start()] + v + s[m.end():], depth + 1)
+    return out
+found = set()
+for c, xmldir in cands:
+    for p in expand(c):
+        if "${system.theme}.png" not in p or "${" in p.replace("${system.theme}", ""):
+            continue
+        low = p.lower()
+        if "logo" not in low or "collection" in low:
+            continue
+        d = p[: p.rindex("/${system.theme}.png")] if "/${system.theme}.png" in p else None
+        if d is None:
+            continue
+        if not d.startswith("/"):
+            d = os.path.join(xmldir, d)
+        d = os.path.normpath(d)
+        if d == base or d.startswith(base + "/"):
+            found.add(d)
+for d in sorted(found):
+    print(d)
+PY
+}
+
+# Each logo folder gets a list of the logos added by the Logo-Fix
+# (.delorean-logos.txt). Logos that came with the theme are never replaced
+# or removed.
+MANIFEST=.delorean-logos.txt
+
+ours() {   # ours <dir> <file name> -> 0 if the Logo-Fix put it there
+    grep -qxF "$2" "$1/$MANIFEST" 2>/dev/null
+}
+
+copy_logos() {   # copy_logos <target dir> -> prints number of new/changed logos
+    local target="$1" f name n=0
+    for f in "$LOGOS"/*.png; do
+        [ -f "$f" ] || continue
+        name="$(basename "$f")"
+        if [ -e "$target/$name" ] && ! ours "$target" "$name"; then
+            # same file from an older Logo-Fix: take it over; else it's the theme's own
+            cmp -s "$f" "$target/$name" && echo "$name" >> "$target/$MANIFEST"
+            continue
+        fi
+        if ! cmp -s "$f" "$target/$name"; then
+            cp -f "$f" "$target/" 2>/dev/null || continue
+            n=$((n + 1))
+        fi
+        ours "$target" "$name" || echo "$name" >> "$target/$MANIFEST"
+    done
+    echo "$n"
+}
+
+apply() {
+    local changed=0 theme dir n tmp key
+    ls "$LOGOS"/*.png >/dev/null 2>&1 || return 0
+    mkdir -p "$(dirname "$LOG")"
+    for base in $THEME_DIRS; do
+        [ -d "$base" ] || continue
+        for theme in "$base"/*/; do
+            theme="${theme%/}"
+            [ -d "$theme" ] || continue
+            while read -r dir; do
+                [ -n "$dir" ] || continue
+                case "$dir" in
+                    /userdata/*)
+                        [ -d "$dir" ] || { [ -d "$(dirname "$dir")" ] && mkdir -p "$dir"; } || continue
+                        n=$(copy_logos "$dir")
+                        [ "$n" -gt 0 ] && { log "copied $n logo(s) to $dir"; changed=1; }
+                        ;;
+                    *)
+                        [ -d "$dir" ] || continue
+                        key="$(echo "$dir" | md5sum | cut -c1-12)"
+                        tmp="$RUN/$key"
+                        if ! grep -q " $dir " /proc/mounts; then
+                            rm -rf "$tmp"; mkdir -p "$tmp"
+                            cp -a "$dir/." "$tmp/" || continue
+                            copy_logos "$tmp" >/dev/null
+                            if mount --bind "$tmp" "$dir"; then
+                                echo "$dir" >> "$RUN/mounted"
+                                log "mounted logos over $dir"
+                                changed=1
+                            fi
+                        else
+                            n=$(copy_logos "$tmp")
+                            [ "$n" -gt 0 ] && { log "added $n logo(s) to $dir"; changed=1; }
+                        fi
+                        ;;
+                esac
+            done < <(logo_dirs_of_theme "$theme")
+        done
+    done
+    return $((1 - changed))   # 0 = something changed
+}
+
+# EmulationStation is usually already running when services start:
+# reload it once so the new logos show up.
+reload_es() {
+    local i
+    for i in $(seq 1 60); do
+        if curl -s -m 2 http://127.0.0.1:1234/caps >/dev/null 2>&1; then
+            sleep 3
+            curl -s -m 10 http://127.0.0.1:1234/reloadgames >/dev/null 2>&1 && log "EmulationStation reloaded"
+            return
+        fi
+        sleep 2
+    done
+}
+
+# remove one logo (e.g. "winamp") from all themes, used by the uninstallers
+remove_logo() {
+    local name="$1" base theme dir
+    [ -n "$name" ] || return 0
+    for base in $THEME_DIRS; do
+        [ -d "$base" ] || continue
+        for theme in "$base"/*/; do
+            theme="${theme%/}"
+            while read -r dir; do
+                [ -n "$dir" ] || continue
+                case "$dir" in
+                    /userdata/*) ;;
+                    *) dir="$RUN/$(echo "$dir" | md5sum | cut -c1-12)" ;;   # RAM copy behind the mount
+                esac
+                [ -e "$dir/$name.png" ] || continue
+                # only logos added by the Logo-Fix (or identical to ours from an older version)
+                if ours "$dir" "$name.png" || cmp -s "$LOGOS/$name.png" "$dir/$name.png"; then
+                    rm -f "$dir/$name.png" && log "removed $name.png from $dir"
+                    if [ -f "$dir/$MANIFEST" ]; then
+                        grep -vxF "$name.png" "$dir/$MANIFEST" > "$dir/$MANIFEST.new"
+                        if [ -s "$dir/$MANIFEST.new" ]; then mv "$dir/$MANIFEST.new" "$dir/$MANIFEST"
+                        else rm -f "$dir/$MANIFEST" "$dir/$MANIFEST.new"; fi
+                    fi
+                fi
+            done < <(logo_dirs_of_theme "$theme")
+        done
+    done
+}
+
+stop_mounts() {
+    local dir
+    [ -f "$RUN/mounted" ] || return 0
+    while read -r dir; do
+        [ -n "$dir" ] && umount "$dir" 2>/dev/null && log "unmounted $dir"
+    done < "$RUN/mounted"
+    rm -rf "$RUN"
+}
+
+case "$1" in
+    remove)
+        remove_logo "$2"
+        exit 0
+        ;;
+    stop)
+        stop_mounts
+        exit 0
+        ;;
+    start)
+        if apply; then
+            pidof emulationstation >/dev/null 2>&1 && reload_es
+        fi
+        ;;
+    apply)
+        # used by installers: only put the logos in place, no reload
+        apply
+        exit 0
+        ;;
+    status)
+        ls "$LOGOS"/*.png >/dev/null 2>&1 || exit 1
+        exit 0
+        ;;
+esac
+exit 0
