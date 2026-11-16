@@ -8,7 +8,7 @@ Das ist ein inoffizielles Fanprojekt und hat nichts mit Winamp oder Batocera sel
 
 ## Was du bekommst
 
-- **Eigenes System „Winamp“** mit Logo, das bei jedem Theme angezeigt wird, auch beim Batocera-Standard-Theme
+- **Eigenes System „Winamp“** mit eigenem Logo
 - **Winamp 5.8** mit Medienbibliothek, Playlist und Equalizer
 - **Milkdrop 2** mit rund 10.000 Visualisierungen, erst auf Knopfdruck, auch im Vollbild
 - **17 Skins**: Big Bento (Standard), Bento, Winamp Modern, Winamp Classic und 13 klassische Skins
@@ -97,10 +97,6 @@ Eigene Skins (`.wsz` oder `.wal`) einfach nach `/userdata/roms/winamp/Winamp.pc/
 ## Deinstallieren
 
 Den **Winamp Installer** in Ports starten und **Uninstall Winamp** wählen. Entfernt werden das System, das Programm, die Einstellungen, die Wine-Umgebung und das Logo. Vorher fragt er, ob deine Wallpaper mit gelöscht werden sollen. **Deine Musik bleibt immer erhalten.**
-
-## DeLorean Logo-Fix
-
-Der Installer bringt einen kleinen Dienst mit (`delorean_logos`). Er legt die Systemlogos aus `/userdata/system/delorean-logos` bei jedem Start in alle installierten Themes, auch in das schreibgeschützte Standard-Theme. Dabei wird am System selbst nichts verändert. Den Dienst nutzen auch andere Installer von DeLorean23. Log: `/userdata/system/logs/delorean_logos.log`.
 
 ## Wie es funktioniert
 
